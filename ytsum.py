@@ -28,6 +28,7 @@ APP = "ytsum"
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / APP
 CRED_FILE = CONFIG_DIR / "credentials"
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / APP
+OUTPUT_DIR = Path.home() / "youtube-summarizer"
 
 MODEL = "claude-opus-5"
 # USD per million tokens: (input, output). Used only for the cost estimate.
@@ -107,6 +108,23 @@ def green(t: str) -> str:
 def say(message: str = "") -> None:
     """Progress and prompts go to stderr so the summary itself can be piped."""
     print(message, file=sys.stderr, flush=True)
+
+
+def ask_style() -> str:
+    """Ask how long the summary should be, before any work is done."""
+    say()
+    say(bold("How long should the summary be?"))
+    say("  1) Short      about 200 words of bullet points")
+    say("  2) Detailed   600-1200 words under headings " + dim("(default)"))
+    while True:
+        choice = ask("Choose 1 or 2 [2]: ").lower()
+        if choice in ("", "2", "d", "detailed", "long"):
+            return "detailed"
+        if choice in ("1", "s", "short", "brief"):
+            return "brief"
+        if choice in ("3", "n", "notes"):  # undocumented third option
+            return "notes"
+        say("Please type 1 or 2.")
 
 
 def ask(prompt: str) -> str:
@@ -593,7 +611,9 @@ def main() -> None:
         epilog="Run with no arguments and ytsum will ask you for a video.",
     )
     parser.add_argument("video", nargs="?", help="YouTube URL or bare video ID")
-    parser.add_argument("--style", choices=sorted(STYLES), default="detailed")
+    parser.add_argument(
+        "--style", choices=sorted(STYLES), default=None, help="skip the length question"
+    )
     parser.add_argument("--focus", help="what the summary should centre on")
     parser.add_argument("--lang", default="en", help="caption language (default: en)")
     parser.add_argument("--model", default=MODEL, help=f"Claude model (default: {MODEL})")
@@ -625,6 +645,10 @@ def main() -> None:
     target = args.video or ask("YouTube URL or video ID: ")
     vid = video_id(target)
 
+    style = args.style
+    if style is None:
+        style = ask_style() if sys.stdin.isatty() and not args.transcript_only else "detailed"
+
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     cache = CACHE_DIR / f"{vid}.{args.lang}.txt"
 
@@ -655,7 +679,7 @@ def main() -> None:
     client = make_client(key, workspace)
     try:
         summary = summarize(
-            client, args.model, meta_block, transcript, args.style, args.focus, spend
+            client, args.model, meta_block, transcript, style, args.focus, spend
         )
     except anthropic.AuthenticationError:
         raise SystemExit(f"Anthropic rejected the stored key. Run `{APP} --reset-key`.")
@@ -672,10 +696,11 @@ def main() -> None:
         raise SystemExit("\nStopped.")
 
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:60]
-    path = args.out or Path.cwd() / f"{datetime.now():%Y-%m-%d}-{slug}-{args.style}.md"
+    path = args.out or OUTPUT_DIR / f"{datetime.now():%Y-%m-%d}-{slug}-{style}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         f"# {title}\n\n{meta_block}\n"
-        f"Summarized: {datetime.now():%Y-%m-%d %H:%M} with {args.model} ({args.style})\n\n"
+        f"Summarized: {datetime.now():%Y-%m-%d %H:%M} with {args.model} ({style})\n\n"
         f"---\n\n{summary}\n",
         encoding="utf-8",
     )

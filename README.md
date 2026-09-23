@@ -5,6 +5,12 @@ Summarize a YouTube video from the command line. Paste a link, get a summary.
 ```
 $ ytsum
 YouTube URL or video ID: https://www.youtube.com/watch?v=zBNKrja8dyY
+
+How long should the summary be?
+  1) Short      about 200 words of bullet points
+  2) Detailed   600-1200 words under headings (default)
+Choose 1 or 2 [2]: 1
+
 Fetching captions...
 Got 15,919 words, 1h 18m.
 Interview with the company's NEW CEO
@@ -71,8 +77,8 @@ ytsum --focus "what they say about pricing" <url>
 
 | Flag | What it does |
 | --- | --- |
-| `--style detailed` | default; 600–1200 words under headings derived from the content |
-| `--style brief` | ~200 words, 5–8 bullets |
+| `--style detailed` | skip the length question; 600–1200 words under headings |
+| `--style brief` | skip the length question; ~200 words, 5–8 bullets |
 | `--style notes` | dense nested study notes, timestamps on most bullets |
 | `--focus "..."` | centre the summary on one thing; it says so if the video barely covers it |
 | `--lang de` | caption language — YouTube auto-translates, so this works on English videos too |
@@ -83,7 +89,9 @@ ytsum --focus "what they say about pricing" <url>
 | `--model` | defaults to `claude-opus-5` |
 | `--out FILE` | write the summary somewhere specific |
 
-Summaries are written to the current folder as `YYYY-MM-DD-<title>-<style>.md`.
+Summaries are written to `~/youtube-summarizer/` as `YYYY-MM-DD-<title>-<style>.md`,
+so they collect in one place wherever you run the command from. `--out FILE`
+overrides it.
 Captions are cached in `~/.cache/ytsum/`, so re-running the same video with a
 different `--style` costs one API call and no re-fetch.
 
