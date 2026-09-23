@@ -1,9 +1,14 @@
 # Never commit credentials
 .env
 .env.*
-!.env.example
 
+# Python build artifacts
+build/
+dist/
+*.egg-info/
+__pycache__/
 .venv/
+
+# Local output from earlier versions
 transcripts/
 summaries/
-__pycache__/

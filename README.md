@@ -1,50 +1,60 @@
 # ytsum
 
-Summarize a YouTube video from the command line, using its captions and the Claude API.
-
-YouTube blocks most server-side fetchers, so the captions have to be pulled with a real
-client rather than a plain HTTP request. `ytsum` does that, cleans up the subtitle file,
-and hands the transcript to Claude with a prompt tuned for one specific failure mode:
-auto-generated captions mangle names, and a summarizer that papers over the mangling
-produces confident nonsense.
+Summarize a YouTube video from the command line. Paste a link, get a summary.
 
 ```
-$ ytsum.py "https://www.youtube.com/live/zBNKrja8dyY" --style brief
+$ ytsum
+YouTube URL or video ID: https://www.youtube.com/watch?v=zBNKrja8dyY
+Fetching captions...
+Got 15,919 words, 1h 18m.
+Interview with the company's NEW CEO
+Summarizing with claude-opus-5...
 
-- the host says a rival broker led the company by ~30% on throughput four years ago, but the company closed
-  the gap and is now "a little ahead" [00:18:00].
-- Founders (three founders — sp?) resigned operational roles voluntarily,
-  remain on the board and own >50% [00:29:00].
+- the speaker says the founders resigned voluntarily, recognizing their limits in scaling
+  past ~100–200 people; they remain on the board and still own over half the company
+  [00:20:12].
+- the host's framing: the company's tech was never the problem — throughput now edges out
+  a rival broker — but messaging, go-to-market and especially opaque pricing are [00:18:00].
+────────────────────────────────────────────────────────────
+28,110 in / 639 out · about $0.16
+Saved to 2026-09-23-example-video-brief.md
 ```
-
-## How it works
-
-1. `yt-dlp` fetches the subtitle track only (`skip_download`) — no video is downloaded.
-2. The VTT is flattened into plain text: markup stripped, rolling-caption duplicates
-   collapsed, and `[HH:MM:SS]` markers inserted once a minute so the summary can cite
-   jump points.
-3. The transcript goes to Claude in a single streamed request. A 78-minute stream is
-   ~28k tokens against a 1M-token context window, so chunking is the exception — only
-   genuinely enormous transcripts get split into parts and synthesized.
-4. Transcripts are cached in `transcripts/`, so re-running with a different `--style`
-   or `--focus` is one API call and no re-fetch.
 
 ## Install
 
 ```bash
-git clone https://github.com/quarksus/youtube-summarizer.git
-cd youtube-summarizer
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-cp .env.example .env    # then paste your ANTHROPIC_API_KEY
+curl -fsSL https://raw.githubusercontent.com/quarksus/youtube-summarizer/main/install.sh | bash
 ```
 
-Get an API key at [console.anthropic.com](https://console.anthropic.com/settings/keys).
+That is the whole setup. The installer checks your Python, builds an isolated
+environment, installs the dependencies and puts a `ytsum` command on your PATH.
+It only asks for a password if your system is missing Python's `venv` package and
+there's no way around it — on most machines it never needs one.
 
-## Use
+Already have [pipx](https://pipx.pypa.io)? `pipx install git+https://github.com/quarksus/youtube-summarizer.git` works too.
+
+## First run
+
+Run `ytsum`. It asks for an Anthropic API key once
+([get one here](https://console.anthropic.com/settings/keys)), checks the key
+actually works, and saves it to `~/.config/ytsum/credentials` with `0600`
+permissions — readable only by your user account, never in a project folder or a
+git repo, and sent only to `api.anthropic.com`.
+
+Anyone with root on your machine can still read that file, as with any stored
+credential. If the machine is ever compromised, revoke the key in the Console.
+
+After that, `ytsum` goes straight to asking for a video. Replace the key any time
+with `ytsum --reset-key`.
+
+## Everyday use
 
 ```bash
-.venv/bin/python ytsum.py "https://www.youtube.com/watch?v=VIDEO_ID"
+ytsum                                      # asks you for a video
+ytsum zBNKrja8dyY                          # bare video ID
+ytsum "https://youtu.be/zBNKrja8dyY"       # any YouTube URL shape
+ytsum --style brief <url>                  # ~200 words instead of ~1000
+ytsum --focus "what they say about pricing" <url>
 ```
 
 | Flag | What it does |
@@ -52,39 +62,58 @@ Get an API key at [console.anthropic.com](https://console.anthropic.com/settings
 | `--style detailed` | default; 600–1200 words under headings derived from the content |
 | `--style brief` | ~200 words, 5–8 bullets |
 | `--style notes` | dense nested study notes, timestamps on most bullets |
-| `--focus "..."` | centre the summary on one thing; it will say so if the video barely covers it |
+| `--focus "..."` | centre the summary on one thing; it says so if the video barely covers it |
 | `--lang de` | caption language — YouTube auto-translates, so this works on English videos too |
-| `--transcript-only` | fetch and clean the captions, skip Claude entirely (no API cost) |
-| `--refresh` | re-fetch instead of using the cached transcript |
+| `--transcript-only` | print the cleaned captions, no API call, no cost |
+| `--refresh` | re-fetch instead of using the cached captions |
+| `--reset-key` | replace the stored API key |
 | `--model` | defaults to `claude-opus-5` |
-| `--out FILE` | write somewhere other than `summaries/` |
+| `--out FILE` | write the summary somewhere specific |
 
-Summaries are written to `summaries/YYYY-MM-DD-<slug>-<style>.md`. Both output
-directories are gitignored.
+Summaries are written to the current folder as `YYYY-MM-DD-<title>-<style>.md`.
+Captions are cached in `~/.cache/ytsum/`, so re-running the same video with a
+different `--style` costs one API call and no re-fetch.
+
+Every run ends with the tokens used and an estimated cost, so there are no
+surprises on the bill.
+
+## How it works
+
+1. `yt-dlp` fetches the subtitle track only — no video is downloaded.
+2. The VTT is flattened into plain text: markup stripped, rolling-caption
+   duplicates collapsed, `[HH:MM:SS]` markers inserted once a minute so the
+   summary can cite jump points.
+3. The transcript goes to Claude in a single streamed request. A 78-minute stream
+   is ~28k tokens against a 1M-token context window, so chunking is the exception
+   — only enormous transcripts get split into parts and synthesized.
 
 ## The prompt is the interesting part
 
-Most of the quality difference lives in the system prompt, not the plumbing. It holds
-Claude to four rules:
+Most of the quality difference lives in the system prompt, not the plumbing. It
+holds Claude to four rules:
 
-- use only the transcript — no outside knowledge, and no guessing to smooth over a gap;
+- use only the transcript — no outside knowledge, and no guessing to fill a gap;
 - mark uncertain proper nouns `(sp?)` rather than inventing a confident spelling;
 - attribute claims to whoever made them instead of restating them as fact;
 - cite `[HH:MM:SS]` timestamps for points worth jumping to.
 
 The first two matter more than they look. Auto-generated captions garble names
-constantly, and without those rules a summary will cheerfully invent a plausible-looking
-name for a person who was never named.
+constantly, and without those rules a summary will cheerfully invent a
+plausible-looking name for someone who was never named.
 
 ## Limits
 
-- **No captions, no summary.** Videos with captions disabled need audio transcription
-  (e.g. Whisper). Not implemented.
-- **TLS behind an inspecting proxy.** yt-dlp ships its own certifi bundle, which a
-  TLS-inspecting corporate proxy will break. ytsum catches that and retries against the
-  system trust store.
-- **Debian/Ubuntu `ensurepip`.** If `python3 -m venv .venv` fails with "ensurepip is not
-  available", install the matching venv package (`apt install python3.x-venv`).
+- **No captions, no summary.** Videos with captions disabled would need audio
+  transcription (e.g. Whisper). Not implemented.
+- **TLS behind an inspecting proxy.** yt-dlp ships its own certificate bundle,
+  which a corporate TLS-inspecting proxy breaks. ytsum detects that and retries
+  against the system trust store.
+
+## Uninstall
+
+```bash
+rm -rf ~/.local/share/ytsum ~/.local/bin/ytsum ~/.config/ytsum ~/.cache/ytsum
+```
 
 ## License
 

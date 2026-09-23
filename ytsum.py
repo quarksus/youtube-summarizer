@@ -1,44 +1,42 @@
 """
-ytsum - pull a YouTube video's captions and summarize them with Claude.
+ytsum - summarize a YouTube video from its captions, using Claude.
 
-Fetches the subtitle track with yt-dlp (no video download), cleans the VTT into
-readable text with [HH:MM:SS] markers, and sends it to Claude in one pass. The
-transcript is cached, so re-running with a different --style or --focus costs
-one API call and no re-fetch.
-
-Requires ANTHROPIC_API_KEY in a local .env file (see .env.example).
-
-Usage:
-    .venv/bin/python ytsum.py <url>
-    .venv/bin/python ytsum.py <url> --style brief
-    .venv/bin/python ytsum.py <url> --focus "what they say about pricing"
-    .venv/bin/python ytsum.py <url> --transcript-only
+Run `ytsum` with no arguments and it will ask for what it needs: an API key on
+first run, then a video. Flags are there for scripting, not for daily use.
 """
 
 from __future__ import annotations
 
 import argparse
 import html
+import json
 import os
 import re
 import sys
 import tempfile
 from datetime import datetime
+from getpass import getpass
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import anthropic
-from dotenv import load_dotenv
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
-HERE = Path(__file__).resolve().parent
-TRANSCRIPT_DIR = HERE / "transcripts"
-SUMMARY_DIR = HERE / "summaries"
+APP = "ytsum"
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / APP
+CRED_FILE = CONFIG_DIR / "credentials"
+CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / APP
 
 MODEL = "claude-opus-5"
-# Opus 5 has a 1M-token context window; leave room for the prompt and the answer.
-# Above this we summarize the transcript in parts and synthesize the parts.
+# USD per million tokens: (input, output). Used only for the cost estimate.
+PRICES = {
+    "claude-opus-5": (5.00, 25.00),
+    "claude-sonnet-5": (2.00, 10.00),
+    "claude-haiku-4-5": (1.00, 5.00),
+}
+
+# Opus 5 takes 1M tokens of context; leave room for the prompt and the answer.
 MAX_INPUT_TOKENS = 700_000
 
 SYSTEM = """You summarize video transcripts for a reader who has not watched the video and wants the substance without the runtime.
@@ -74,24 +72,136 @@ TAG = re.compile(r"<[^>]+>")
 SKIP_PREFIX = ("WEBVTT", "Kind:", "Language:", "NOTE", "STYLE", "REGION")
 
 
-def video_id(url: str) -> str:
-    """Pull the 11-character id out of any of YouTube's URL shapes."""
-    parsed = urlparse(url if "//" in url else f"https://{url}")
+# --------------------------------------------------------------------------- ui
+
+
+def paint(text: str, code: str) -> str:
+    return f"\033[{code}m{text}\033[0m" if sys.stderr.isatty() else text
+
+
+def bold(t: str) -> str:
+    return paint(t, "1")
+
+
+def dim(t: str) -> str:
+    return paint(t, "2")
+
+
+def green(t: str) -> str:
+    return paint(t, "32")
+
+
+def say(message: str = "") -> None:
+    """Progress and prompts go to stderr so the summary itself can be piped."""
+    print(message, file=sys.stderr, flush=True)
+
+
+def ask(prompt: str) -> str:
+    try:
+        sys.stderr.write(bold(prompt))
+        sys.stderr.flush()
+        return input().strip()
+    except (EOFError, KeyboardInterrupt):
+        raise SystemExit("\nCancelled.")
+
+
+# ----------------------------------------------------------------------- the key
+
+
+def load_key() -> str | None:
+    env = os.environ.get("ANTHROPIC_API_KEY")
+    if env and env.strip():
+        return env.strip()
+    if CRED_FILE.exists():
+        try:
+            return json.loads(CRED_FILE.read_text())["api_key"].strip()
+        except (json.JSONDecodeError, KeyError, OSError):
+            say(dim(f"Ignoring unreadable {CRED_FILE}"))
+    return None
+
+
+def save_key(key: str) -> None:
+    """Write the key so that only this user account can read it, from the start."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(CONFIG_DIR, 0o700)
+    fd = os.open(CRED_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        json.dump({"api_key": key}, handle)
+        handle.write("\n")
+
+
+def setup_key() -> str:
+    say()
+    say(bold("First run - ytsum needs an Anthropic API key."))
+    say("Create one at https://console.anthropic.com/settings/keys")
+    say(dim("Your typing stays hidden, so nothing appears on screen when you paste."))
+    say()
+    while True:
+        try:
+            key = getpass("Paste your API key, then press Enter: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            raise SystemExit("\nCancelled.")
+        if not key:
+            say("Nothing was pasted. Try again.\n")
+            continue
+        if not key.startswith("sk-ant-"):
+            say(dim("That doesn't look like an Anthropic key - they begin with 'sk-ant-'."))
+            if ask("Use it anyway? [y/N] ").lower() not in ("y", "yes"):
+                say()
+                continue
+        sys.stderr.write("Checking it with Anthropic... ")
+        sys.stderr.flush()
+        try:
+            anthropic.Anthropic(api_key=key).models.list(limit=1)
+        except anthropic.AuthenticationError:
+            say("rejected.")
+            say("That key isn't valid. Check you copied all of it.\n")
+            continue
+        except anthropic.APIError as err:
+            say(f"couldn't reach the API ({type(err).__name__}); saving it anyway.")
+        else:
+            say("works.")
+
+        save_key(key)
+        say()
+        say(green("Key saved.") + f"  {CRED_FILE}")
+        say("  - File permissions are 0600: only your user account can read it.")
+        say("  - It lives in your home config folder, never in a project or git repo.")
+        say("  - ytsum sends it to api.anthropic.com and nowhere else.")
+        say(dim("  Anyone with administrator access to this machine could still read it,"))
+        say(dim("  so revoke the key in the Console if the machine is ever compromised."))
+        say()
+        return key
+
+
+# ------------------------------------------------------------------- transcript
+
+
+def video_id(text: str) -> str:
+    """Accept a full URL in any of YouTube's shapes, or a bare video ID."""
+    text = text.strip()
+    if re.fullmatch(r"[\w-]{11}", text):
+        return text
+    parsed = urlparse(text if "//" in text else f"https://{text}")
     if parsed.netloc.endswith("youtu.be"):
         candidate = parsed.path.lstrip("/")
     elif "v" in parse_qs(parsed.query):
         candidate = parse_qs(parsed.query)["v"][0]
     else:
-        # /live/<id>, /shorts/<id>, /embed/<id>
         candidate = parsed.path.rstrip("/").rsplit("/", 1)[-1]
     if not re.fullmatch(r"[\w-]{11}", candidate):
-        raise SystemExit(f"Could not find a video id in: {url}")
+        raise SystemExit(f"That doesn't look like a YouTube video: {text}")
     return candidate
 
 
 def fmt_ts(seconds: float) -> str:
     s = int(seconds)
     return f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"
+
+
+def fmt_duration(seconds: float) -> str:
+    s = int(seconds)
+    return f"{s // 3600}h {s % 3600 // 60:02d}m" if s >= 3600 else f"{s // 60}m {s % 60:02d}s"
 
 
 def vtt_to_text(vtt: str, marker_every: int = 60) -> str:
@@ -155,22 +265,21 @@ def fetch(url: str, lang: str) -> tuple[dict, str]:
                 info = ydl.extract_info(url, download=True)
         except DownloadError as err:
             if "certificate" not in str(err).lower():
-                raise SystemExit(f"yt-dlp failed: {err}") from err
-            print("TLS error, retrying with the system certificate store...", file=sys.stderr)
+                raise SystemExit(f"Could not reach that video: {err}") from err
+            say(dim("TLS error - retrying with the system certificate store..."))
             with YoutubeDL(ydl_options(lang, outdir, no_certifi=True)) as ydl:
                 info = ydl.extract_info(url, download=True)
 
         files = sorted(outdir.glob("*.vtt"))
         # Several tracks can match (en, en-orig, ...); prefer the exact language.
-        exact = [f for f in files if f.name.endswith(f".{lang}.vtt")]
-        files = exact or files
+        files = [f for f in files if f.name.endswith(f".{lang}.vtt")] or files
         if not files:
             available = sorted(
                 set(info.get("subtitles") or {}) | set(info.get("automatic_captions") or {})
             )
-            hint = f" Available languages: {', '.join(available[:20])}" if available else ""
+            hint = f"\nAvailable: {', '.join(available[:20])}" if available else ""
             raise SystemExit(
-                f"No '{lang}' captions for this video.{hint}\n"
+                f"This video has no '{lang}' captions.{hint}\n"
                 "Pick another with --lang, or transcribe the audio yourself (e.g. Whisper)."
             )
         transcript = vtt_to_text(files[0].read_text(encoding="utf-8", errors="replace"))
@@ -196,7 +305,31 @@ def header(meta: dict) -> str:
     return "\n".join(bits)
 
 
-def ask(client: anthropic.Anthropic, model: str, prompt: str, echo: bool) -> tuple[str, object]:
+# ---------------------------------------------------------------------- claude
+
+
+class Spend:
+    """Running total of tokens, so the footer can report the real cost."""
+
+    def __init__(self, model: str) -> None:
+        self.model = model
+        self.input = 0
+        self.output = 0
+
+    def add(self, usage) -> None:
+        self.input += getattr(usage, "input_tokens", 0)
+        self.output += getattr(usage, "output_tokens", 0)
+
+    def summary(self) -> str:
+        tokens = f"{self.input:,} in / {self.output:,} out"
+        price = PRICES.get(self.model)
+        if not price:
+            return tokens
+        usd = self.input / 1e6 * price[0] + self.output / 1e6 * price[1]
+        return f"{tokens} · about ${usd:.2f}" if usd >= 0.01 else f"{tokens} · under $0.01"
+
+
+def request(client, model: str, prompt: str, spend: Spend, echo: bool) -> str:
     """One streamed request. Streaming keeps long answers under the HTTP timeout."""
     with client.messages.stream(
         model=model,
@@ -211,8 +344,8 @@ def ask(client: anthropic.Anthropic, model: str, prompt: str, echo: bool) -> tup
         message = stream.get_final_message()
     if echo:
         print()
-    text = "".join(b.text for b in message.content if b.type == "text").strip()
-    return text, message.usage
+    spend.add(message.usage)
+    return "".join(b.text for b in message.content if b.type == "text").strip()
 
 
 def split_parts(transcript: str, parts: int) -> list[str]:
@@ -221,116 +354,127 @@ def split_parts(transcript: str, parts: int) -> list[str]:
     return ["\n".join(lines[i : i + size]) for i in range(0, len(lines), size)]
 
 
-def summarize(
-    client: anthropic.Anthropic,
-    model: str,
-    meta_block: str,
-    transcript: str,
-    style: str,
-    focus: str | None,
-) -> str:
+def summarize(client, model, meta_block, transcript, style, focus, spend) -> str:
     instruction = STYLES[style]
     if focus:
-        instruction += f"\n\nThe reader cares most about: {focus}. Lead with that, and say so plainly if the video barely touches it."
+        instruction += (
+            f"\n\nThe reader cares most about: {focus}. Lead with that, and say so "
+            "plainly if the video barely touches it."
+        )
 
     def one_pass(body: str, note: str = "") -> str:
-        prompt = (
-            f"{meta_block}\n\n{instruction}\n{note}\n\n"
-            f"<transcript>\n{body}\n</transcript>"
-        )
-        text, usage = ask(client, model, prompt, echo=True)
-        print(
-            f"\n[{usage.input_tokens} in / {usage.output_tokens} out]",
-            file=sys.stderr,
-        )
-        return text
+        prompt = f"{meta_block}\n\n{instruction}\n{note}\n\n<transcript>\n{body}\n</transcript>"
+        return request(client, model, prompt, spend, echo=True)
 
     counted = client.messages.count_tokens(
-        model=model,
-        system=SYSTEM,
-        messages=[{"role": "user", "content": transcript}],
+        model=model, system=SYSTEM, messages=[{"role": "user", "content": transcript}]
     ).input_tokens
 
     if counted <= MAX_INPUT_TOKENS:
         return one_pass(transcript)
 
-    # Too long for one request: take notes on each part, then synthesize.
     parts = split_parts(transcript, counted // MAX_INPUT_TOKENS + 1)
-    print(f"Transcript is ~{counted} tokens; summarizing in {len(parts)} parts.", file=sys.stderr)
+    say(dim(f"Long transcript (~{counted:,} tokens) - summarizing in {len(parts)} parts."))
     notes = []
     for i, part in enumerate(parts, 1):
+        say(dim(f"  part {i} of {len(parts)}..."))
         prompt = (
             f"{meta_block}\n\nThis is part {i} of {len(parts)} of a long transcript. "
             "Take thorough notes on THIS PART ONLY - every distinct point, with timestamps. "
             "Do not write an introduction or a conclusion; these notes will be merged with "
             f"the others.\n\n<transcript_part>\n{part}\n</transcript_part>"
         )
-        print(f"--- part {i}/{len(parts)} ---", file=sys.stderr)
-        text, _ = ask(client, model, prompt, echo=False)
-        notes.append(f"## Part {i}\n{text}")
-    joined = "\n\n".join(notes)
+        notes.append(f"## Part {i}\n{request(client, model, prompt, spend, echo=False)}")
     return one_pass(
-        joined,
+        "\n\n".join(notes),
         note="\nThe material below is sequential notes taken from the full transcript, "
         "not the transcript itself. Treat it as the record of the video.",
     )
 
 
+# ------------------------------------------------------------------------ main
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Summarize a YouTube video with Claude.")
-    parser.add_argument("url", help="YouTube URL (watch, youtu.be, /live/ or /shorts/)")
+    parser = argparse.ArgumentParser(
+        prog=APP,
+        description="Summarize a YouTube video from its captions, using Claude.",
+        epilog="Run with no arguments and ytsum will ask you for a video.",
+    )
+    parser.add_argument("video", nargs="?", help="YouTube URL or bare video ID")
     parser.add_argument("--style", choices=sorted(STYLES), default="detailed")
-    parser.add_argument("--focus", help="what the summary should center on")
+    parser.add_argument("--focus", help="what the summary should centre on")
     parser.add_argument("--lang", default="en", help="caption language (default: en)")
     parser.add_argument("--model", default=MODEL, help=f"Claude model (default: {MODEL})")
-    parser.add_argument("--out", type=Path, help="write the summary here instead of summaries/")
-    parser.add_argument("--transcript-only", action="store_true", help="fetch captions, skip Claude")
-    parser.add_argument("--refresh", action="store_true", help="re-fetch even if cached")
+    parser.add_argument("--out", type=Path, help="write the summary to this file")
+    parser.add_argument("--transcript-only", action="store_true", help="captions only, no API call")
+    parser.add_argument("--refresh", action="store_true", help="re-fetch instead of using the cache")
+    parser.add_argument("--reset-key", action="store_true", help="replace the stored API key")
     args = parser.parse_args()
 
-    load_dotenv(HERE / ".env")
-    TRANSCRIPT_DIR.mkdir(exist_ok=True)
+    if args.reset_key:
+        CRED_FILE.unlink(missing_ok=True)
+        say("Stored key deleted.")
+        setup_key()
+        if not args.video:
+            return
 
-    vid = video_id(args.url)
-    cache = TRANSCRIPT_DIR / f"{vid}.{args.lang}.txt"
+    key = None
+    if not args.transcript_only:
+        key = load_key() or setup_key()
+
+    target = args.video or ask("YouTube URL or video ID: ")
+    vid = video_id(target)
+
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache = CACHE_DIR / f"{vid}.{args.lang}.txt"
 
     if cache.exists() and not args.refresh:
         meta_block, transcript = cache.read_text(encoding="utf-8").split("\n\n---\n\n", 1)
-        print(f"Using cached transcript: {cache.name}", file=sys.stderr)
+        say(dim(f"Using cached captions ({len(transcript.split()):,} words)."))
     else:
-        meta, transcript = fetch(args.url, args.lang)
+        say("Fetching captions...")
+        meta, transcript = fetch(f"https://www.youtube.com/watch?v={vid}", args.lang)
         meta_block = header(meta)
         cache.write_text(f"{meta_block}\n\n---\n\n{transcript}\n", encoding="utf-8")
-        print(f"Transcript saved: {cache.name} ({len(transcript.split())} words)", file=sys.stderr)
+        length = f", {fmt_duration(meta['duration'])}" if meta.get("duration") else ""
+        say(dim(f"Got {len(transcript.split()):,} words{length}."))
 
     title = next(
         (l.removeprefix("Title: ") for l in meta_block.splitlines() if l.startswith("Title: ")),
         "untitled",
     )
+    say(bold(title))
 
     if args.transcript_only:
         print(transcript)
         return
 
-    if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
-        print("Warning: no ANTHROPIC_API_KEY in .env or environment.", file=sys.stderr)
-
-    client = anthropic.Anthropic()
+    say(f"Summarizing with {args.model}...")
+    say()
+    spend = Spend(args.model)
+    client = anthropic.Anthropic(api_key=key)
     try:
-        summary = summarize(client, args.model, meta_block, transcript, args.style, args.focus)
+        summary = summarize(
+            client, args.model, meta_block, transcript, args.style, args.focus, spend
+        )
     except anthropic.AuthenticationError:
-        raise SystemExit("Claude rejected the credentials. Put a working ANTHROPIC_API_KEY in .env.")
+        raise SystemExit(f"Anthropic rejected the stored key. Run `{APP} --reset-key`.")
+    except KeyboardInterrupt:
+        raise SystemExit("\nStopped.")
 
-    SUMMARY_DIR.mkdir(exist_ok=True)
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:60]
-    path = args.out or SUMMARY_DIR / f"{datetime.now():%Y-%m-%d}-{slug}-{args.style}.md"
+    path = args.out or Path.cwd() / f"{datetime.now():%Y-%m-%d}-{slug}-{args.style}.md"
     path.write_text(
         f"# {title}\n\n{meta_block}\n"
         f"Summarized: {datetime.now():%Y-%m-%d %H:%M} with {args.model} ({args.style})\n\n"
         f"---\n\n{summary}\n",
         encoding="utf-8",
     )
-    print(f"\nSaved: {path}", file=sys.stderr)
+    say()
+    say(dim("─" * 60))
+    say(f"{spend.summary()}")
+    say(f"Saved to {path}")
 
 
 if __name__ == "__main__":
