@@ -664,7 +664,8 @@ def summarize(client, model, meta_block, transcript, style, focus, spend) -> str
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog=APP,
+        # Installed as both yt-tldw and ytsum; show whichever name was typed.
+        prog=Path(sys.argv[0]).name or APP,
         description="Summarize a YouTube video from its captions, using Claude.",
         epilog="Run with no arguments and ytsum will ask you for a video.",
     )

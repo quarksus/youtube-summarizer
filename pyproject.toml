@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yt-tldw"
-version = "1.0.0"
+version = "1.1.0"
 description = "Summarize a YouTube video from its captions, using Claude"
 readme = "README.md"
 license = "MIT"
@@ -38,6 +38,9 @@ Issues = "https://github.com/quarksus/youtube-summarizer/issues"
 dev = ["pytest>=8", "build", "twine"]
 
 [project.scripts]
+# The distribution is yt-tldw, so that name works; ytsum stays as an alias
+# because it is what the docs, the config directory and habit already use.
+yt-tldw = "ytsum:main"
 ytsum = "ytsum:main"
 
 [tool.setuptools]

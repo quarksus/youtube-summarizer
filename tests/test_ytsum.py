@@ -366,3 +366,21 @@ def test_declared_python_floor_covers_our_dependencies():
             f"{package} needs Python >={'.'.join(map(str, theirs))} "
             f"but we declare {declared}"
         )
+
+
+def test_both_command_names_are_declared():
+    """yt-tldw matches the distribution; ytsum is the alias people already type."""
+    from pathlib import Path
+
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        pytest.skip("tomllib requires Python 3.11")
+
+    pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    if not pyproject.exists():
+        pytest.skip("pyproject.toml not available")
+
+    scripts = tomllib.load(pyproject.open("rb"))["project"]["scripts"]
+    assert set(scripts) == {"yt-tldw", "ytsum"}
+    assert set(scripts.values()) == {"ytsum:main"}, "both must call the same entry point"

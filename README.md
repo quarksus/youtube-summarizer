@@ -38,7 +38,8 @@ pipx install yt-tldw
 
 or with [uv](https://docs.astral.sh/uv/): `uv tool install yt-tldw`.
 
-The distribution is called **yt-tldw**; the command it installs is **`ytsum`**.
+Installs two names for the same tool: **`yt-tldw`** (matching the package) and
+**`ytsum`** (shorter, and what the rest of this README uses). Use whichever you prefer.
 
 No pipx or uv? One line, no prerequisites:
 
