@@ -105,6 +105,63 @@ def ask(prompt: str) -> str:
         raise SystemExit("\nCancelled.")
 
 
+def read_secret(prompt: str) -> str:
+    """Read a secret, echoing '*' per character.
+
+    getpass() shows nothing at all, which makes a failed paste look exactly like
+    a frozen program. Echoing a mask means you can see the paste land.
+    """
+    if not sys.stdin.isatty():
+        return getpass(prompt)
+    try:
+        import termios
+        import tty
+    except ImportError:  # not a POSIX terminal
+        return getpass(prompt)
+
+    sys.stderr.write(prompt)
+    sys.stderr.flush()
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd)
+    buf = bytearray()
+    try:
+        tty.setraw(fd)
+        while True:
+            ch = os.read(fd, 1)
+            if ch in (b"\r", b"\n", b"", b"\x04"):
+                break
+            if ch == b"\x03":
+                raise KeyboardInterrupt
+            if ch in (b"\x7f", b"\b"):
+                if buf:
+                    buf.pop()
+                    sys.stderr.write("\b \b")
+                    sys.stderr.flush()
+                continue
+            if ch == b"\x15":  # Ctrl-U clears the line
+                sys.stderr.write("\b \b" * len(buf))
+                sys.stderr.flush()
+                buf.clear()
+                continue
+            if ch == b"\x1b":
+                # Swallow arrow keys and bracketed-paste markers
+                # (\x1b[200~ ... \x1b[201~) rather than masking them as characters.
+                if os.read(fd, 1) == b"[":
+                    while True:
+                        tail = os.read(fd, 1)
+                        if not tail or tail.isalpha() or tail == b"~":
+                            break
+                continue
+            if ch >= b"\x20":
+                buf.extend(ch)
+                sys.stderr.write("*")
+                sys.stderr.flush()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        sys.stderr.write("\n")
+    return buf.decode("utf-8", "ignore")
+
+
 # ----------------------------------------------------------------------- the key
 
 
@@ -130,48 +187,75 @@ def save_key(key: str) -> None:
         handle.write("\n")
 
 
+def store_key(key: str) -> str:
+    """Check a key against the API, save it, and explain where it went."""
+    sys.stderr.write("Checking it with Anthropic... ")
+    sys.stderr.flush()
+    try:
+        anthropic.Anthropic(api_key=key).models.list(limit=1)
+    except anthropic.AuthenticationError:
+        say("rejected.")
+        say("That key isn't valid. Check you copied all of it.\n")
+        return ""
+    except anthropic.APIError as err:
+        say(f"couldn't reach the API ({type(err).__name__}); saving it anyway.")
+    else:
+        say("works.")
+
+    save_key(key)
+    say()
+    say(green("Key saved.") + f"  {CRED_FILE}")
+    say("  - File permissions are 0600: only your user account can read it.")
+    say("  - It lives in your home config folder, never in a project or git repo.")
+    say("  - ytsum sends it to api.anthropic.com and nowhere else.")
+    say(dim("  Anyone with administrator access to this machine could still read it,"))
+    say(dim("  so revoke the key in the Console if the machine is ever compromised."))
+    say()
+    return key
+
+
 def setup_key() -> str:
+    # A key piped in (`echo $KEY | ytsum --set-key`) skips the prompt entirely.
+    if not sys.stdin.isatty():
+        piped = sys.stdin.read().strip()
+        if piped:
+            return store_key(piped) or sys.exit("Key rejected.")
+
     say()
     say(bold("First run - ytsum needs an Anthropic API key."))
     say("Create one at https://console.anthropic.com/settings/keys")
-    say(dim("Your typing stays hidden, so nothing appears on screen when you paste."))
     say()
+    say(dim("Paste with Ctrl+Shift+V, or middle-click (Cmd+V on macOS)."))
+    say(dim("Ctrl+V does not paste in most Linux terminals."))
+    say(dim("You will see one * per character. Press Enter when done."))
+    say()
+
+    empty = 0
     while True:
         try:
-            key = getpass("Paste your API key, then press Enter: ").strip()
+            key = read_secret("API key: ").strip()
         except (EOFError, KeyboardInterrupt):
             raise SystemExit("\nCancelled.")
+
         if not key:
-            say("Nothing was pasted. Try again.\n")
+            empty += 1
+            say("Nothing arrived at the prompt.")
+            if empty >= 2:
+                say()
+                say("If your terminal won't paste, use one of these instead:")
+                say(dim("  ytsum --set-key          then paste, press Enter, then Ctrl-D"))
+                say(dim("  ANTHROPIC_API_KEY=sk-ant-... ytsum"))
+                say()
             continue
+
         if not key.startswith("sk-ant-"):
             say(dim("That doesn't look like an Anthropic key - they begin with 'sk-ant-'."))
             if ask("Use it anyway? [y/N] ").lower() not in ("y", "yes"):
                 say()
                 continue
-        sys.stderr.write("Checking it with Anthropic... ")
-        sys.stderr.flush()
-        try:
-            anthropic.Anthropic(api_key=key).models.list(limit=1)
-        except anthropic.AuthenticationError:
-            say("rejected.")
-            say("That key isn't valid. Check you copied all of it.\n")
-            continue
-        except anthropic.APIError as err:
-            say(f"couldn't reach the API ({type(err).__name__}); saving it anyway.")
-        else:
-            say("works.")
 
-        save_key(key)
-        say()
-        say(green("Key saved.") + f"  {CRED_FILE}")
-        say("  - File permissions are 0600: only your user account can read it.")
-        say("  - It lives in your home config folder, never in a project or git repo.")
-        say("  - ytsum sends it to api.anthropic.com and nowhere else.")
-        say(dim("  Anyone with administrator access to this machine could still read it,"))
-        say(dim("  so revoke the key in the Console if the machine is ever compromised."))
-        say()
-        return key
+        if store_key(key):
+            return key
 
 
 # ------------------------------------------------------------------- transcript
@@ -410,7 +494,15 @@ def main() -> None:
     parser.add_argument("--transcript-only", action="store_true", help="captions only, no API call")
     parser.add_argument("--refresh", action="store_true", help="re-fetch instead of using the cache")
     parser.add_argument("--reset-key", action="store_true", help="replace the stored API key")
+    parser.add_argument(
+        "--set-key", action="store_true", help="store a key read from stdin or a prompt"
+    )
     args = parser.parse_args()
+
+    if args.set_key:
+        setup_key()
+        if not args.video:
+            return
 
     if args.reset_key:
         CRED_FILE.unlink(missing_ok=True)

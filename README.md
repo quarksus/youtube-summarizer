@@ -44,6 +44,18 @@ git repo, and sent only to `api.anthropic.com`.
 Anyone with root on your machine can still read that file, as with any stored
 credential. If the machine is ever compromised, revoke the key in the Console.
 
+The prompt masks what you type with `*`, so you can see the paste land. Note that
+**Ctrl+V does not paste in most Linux terminals** — use Ctrl+Shift+V or middle-click
+(Cmd+V on macOS).
+
+If your terminal fights you, two alternatives:
+
+```bash
+ytsum --set-key                  # paste, press Enter, then Ctrl-D
+echo "sk-ant-..." | ytsum --set-key
+ANTHROPIC_API_KEY=sk-ant-... ytsum    # skip the stored key entirely
+```
+
 After that, `ytsum` goes straight to asking for a video. Replace the key any time
 with `ytsum --reset-key`.
 
@@ -67,6 +79,7 @@ ytsum --focus "what they say about pricing" <url>
 | `--transcript-only` | print the cleaned captions, no API call, no cost |
 | `--refresh` | re-fetch instead of using the cached captions |
 | `--reset-key` | replace the stored API key |
+| `--set-key` | store a key from a prompt or piped in from stdin |
 | `--model` | defaults to `claude-opus-5` |
 | `--out FILE` | write the summary somewhere specific |
 
