@@ -341,8 +341,12 @@ def test_declared_python_floor_covers_our_dependencies():
     anthropic 1.x requires 3.10, so `pip install` failed for 3.9 users.
     """
     import importlib.metadata as md
-    import tomllib
     from pathlib import Path
+
+    try:
+        import tomllib                  # 3.11+; this guard simply sits out on 3.10
+    except ModuleNotFoundError:
+        pytest.skip("tomllib requires Python 3.11")
 
     root = Path(__file__).resolve().parent.parent
     pyproject = root / "pyproject.toml"
