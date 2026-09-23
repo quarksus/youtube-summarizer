@@ -9,7 +9,7 @@ description = "Summarize a YouTube video from its captions, using Claude"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
-requires-python = ">=3.9"
+requires-python = ">=3.10"   # anthropic 1.x requires 3.10+
 authors = [{ name = "Jasmin Skenderi" }]
 keywords = ["youtube", "summary", "transcript", "captions", "claude", "cli"]
 dependencies = ["anthropic>=1.0", "yt-dlp"]
@@ -20,7 +20,6 @@ classifiers = [
     "Intended Audience :: End Users/Desktop",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",

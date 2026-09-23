@@ -15,10 +15,10 @@ fail() { printf '\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
 step "Installing ytsum"
 
 # --- 1. Python ---------------------------------------------------------------
-command -v python3 >/dev/null 2>&1 || fail "python3 not found. Install Python 3.9 or newer, then re-run."
+command -v python3 >/dev/null 2>&1 || fail "python3 not found. Install Python 3.10 or newer, then re-run."
 PYVER=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
-python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' \
-  || fail "Python $PYVER is too old. ytsum needs 3.9 or newer."
+python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' \
+  || fail "Python $PYVER is too old. ytsum needs 3.10 or newer."
 note "Python $PYVER"
 
 # --- 2. Virtual environment --------------------------------------------------

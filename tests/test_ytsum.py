@@ -330,3 +330,35 @@ def test_style_prompt_reasks_after_nonsense(monkeypatch):
     answers = iter(["banana", "1"])
     monkeypatch.setattr("builtins.input", lambda: next(answers))
     assert ytsum.ask_style() == "brief"
+
+
+# --------------------------------------------------------------- packaging
+
+def test_declared_python_floor_covers_our_dependencies():
+    """A floor lower than a dependency's is a broken install, not a warning.
+
+    The first CI run caught exactly this: the code itself runs on 3.9, but
+    anthropic 1.x requires 3.10, so `pip install` failed for 3.9 users.
+    """
+    import importlib.metadata as md
+    import tomllib
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    pyproject = root / "pyproject.toml"
+    if not pyproject.exists():          # installed without the sdist layout
+        pytest.skip("pyproject.toml not available")
+
+    declared = tomllib.load(pyproject.open("rb"))["project"]["requires-python"]
+    ours = tuple(int(p) for p in declared.lstrip(">=").split(".")[:2])
+
+    for package in ("anthropic", "yt-dlp"):
+        spec = md.metadata(package).get("Requires-Python", "")
+        floors = [s for s in spec.split(",") if ">=" in s]
+        if not floors:
+            continue
+        theirs = tuple(int(p) for p in floors[0].split(">=")[1].strip().split(".")[:2])
+        assert ours >= theirs, (
+            f"{package} needs Python >={'.'.join(map(str, theirs))} "
+            f"but we declare {declared}"
+        )
