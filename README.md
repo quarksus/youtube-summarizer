@@ -114,10 +114,23 @@ The first two matter more than they look. Auto-generated captions garble names
 constantly, and without those rules a summary will cheerfully invent a
 plausible-looking name for someone who was never named.
 
+## If your key isn't tied to a workspace
+
+Keys created at the organisation level (Console → Settings → API keys) are not
+scoped to a workspace, and Anthropic rejects every Messages API request from them
+unless you say which workspace to use. ytsum detects this during setup and offers
+to store a workspace ID alongside the key.
+
+The simpler fix is to create the key inside a workspace instead: Console →
+Workspaces → your workspace → API keys. Such a key needs no extra configuration.
+
 ## Limits
 
 - **No captions, no summary.** Videos with captions disabled would need audio
   transcription (e.g. Whisper). Not implemented.
+- **YouTube rate limiting.** Fetching many videos in a short window earns an
+  HTTP 429. ytsum waits and retries three times (5s, 20s, 45s); if it still
+  fails, wait a few minutes. Cached videos keep working.
 - **TLS behind an inspecting proxy.** yt-dlp ships its own certificate bundle,
   which a corporate TLS-inspecting proxy breaks. ytsum detects that and retries
   against the system trust store.

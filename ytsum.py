@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 from datetime import datetime
 from getpass import getpass
 from pathlib import Path
@@ -66,6 +67,18 @@ STYLES = {
         "over prose."
     ),
 }
+
+class QuietLogger:
+    """yt-dlp prints its own ERROR lines even when quiet; we format our own."""
+
+    def debug(self, msg): pass
+
+    def info(self, msg): pass
+
+    def warning(self, msg): pass
+
+    def error(self, msg): pass
+
 
 CUE_TIME = re.compile(r"^(\d{2}):(\d{2}):(\d{2})\.\d{3}\s+-->")
 TAG = re.compile(r"<[^>]+>")
@@ -165,61 +178,121 @@ def read_secret(prompt: str) -> str:
 # ----------------------------------------------------------------------- the key
 
 
-def load_key() -> str | None:
+def load_key() -> tuple[str, str | None] | None:
+    """Return (api_key, workspace_id) from the environment or the stored file."""
     env = os.environ.get("ANTHROPIC_API_KEY")
     if env and env.strip():
-        return env.strip()
+        return env.strip(), os.environ.get("ANTHROPIC_WORKSPACE_ID") or None
     if CRED_FILE.exists():
         try:
-            return json.loads(CRED_FILE.read_text())["api_key"].strip()
+            data = json.loads(CRED_FILE.read_text())
+            return data["api_key"].strip(), data.get("workspace_id") or None
         except (json.JSONDecodeError, KeyError, OSError):
             say(dim(f"Ignoring unreadable {CRED_FILE}"))
     return None
 
 
-def save_key(key: str) -> None:
-    """Write the key so that only this user account can read it, from the start."""
+def save_key(key: str, workspace: str | None) -> None:
+    """Write credentials so that only this user account can read them."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     os.chmod(CONFIG_DIR, 0o700)
+    payload = {"api_key": key}
+    if workspace:
+        payload["workspace_id"] = workspace
     fd = os.open(CRED_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as handle:
-        json.dump({"api_key": key}, handle)
+        json.dump(payload, handle)
         handle.write("\n")
 
 
-def store_key(key: str) -> str:
-    """Check a key against the API, save it, and explain where it went."""
+def make_client(key: str, workspace: str | None = None):
+    headers = {"anthropic-workspace-id": workspace} if workspace else None
+    return anthropic.Anthropic(api_key=key, default_headers=headers)
+
+
+NEEDS_WORKSPACE = "not scoped to a workspace"
+
+
+def check_key(key: str, workspace: str | None) -> tuple[bool, str]:
+    """Try the operation ytsum actually performs. count_tokens is free.
+
+    Anything that works here can summarize; anything that fails here would have
+    failed later, mid-video, after the captions were already fetched.
+    """
+    try:
+        make_client(key, workspace).messages.count_tokens(
+            model=MODEL, messages=[{"role": "user", "content": "hi"}]
+        )
+    except anthropic.AuthenticationError:
+        return False, "invalid"
+    except anthropic.APIConnectionError:
+        return False, "offline"
+    except anthropic.APIStatusError as err:
+        detail = str(getattr(err, "message", "") or err)
+        return False, NEEDS_WORKSPACE if NEEDS_WORKSPACE in detail else detail
+    return True, ""
+
+
+def store_key(key: str, workspace: str | None = None) -> tuple[str, str | None] | None:
+    """Validate credentials, save them, and explain where they went."""
     sys.stderr.write("Checking it with Anthropic... ")
     sys.stderr.flush()
-    try:
-        anthropic.Anthropic(api_key=key).models.list(limit=1)
-    except anthropic.AuthenticationError:
+    ok, problem = check_key(key, workspace)
+
+    if not ok and problem == NEEDS_WORKSPACE:
+        say("needs a workspace.")
+        say()
+        say("This key belongs to your organisation but isn't tied to a workspace,")
+        say("so Anthropic needs to know which workspace to bill and apply limits from.")
+        say()
+        say("Two ways forward:")
+        say(dim("  a) Create a key inside a workspace: Console > Workspaces > your"))
+        say(dim("     workspace > API keys. That key needs no extra setup."))
+        say(dim("  b) Paste the workspace ID here (Console > Workspaces, it looks"))
+        say(dim("     like wrkspc_...). ytsum will send it with every request."))
+        say()
+        entered = ask("Workspace ID (or press Enter to use a different key): ")
+        if not entered:
+            say()
+            return None
+        return store_key(key, entered)
+
+    if not ok and problem == "invalid":
         say("rejected.")
         say("That key isn't valid. Check you copied all of it.\n")
-        return ""
-    except anthropic.APIError as err:
-        say(f"couldn't reach the API ({type(err).__name__}); saving it anyway.")
-    else:
-        say("works.")
+        return None
+    if not ok and problem == "offline":
+        say("no connection.")
+        say("Couldn't reach api.anthropic.com. Check your network and try again.\n")
+        return None
+    if not ok:
+        say("refused.")
+        say(f"Anthropic said: {problem[:200]}\n")
+        return None
 
-    save_key(key)
+    say("works.")
+    save_key(key, workspace)
     say()
     say(green("Key saved.") + f"  {CRED_FILE}")
     say("  - File permissions are 0600: only your user account can read it.")
     say("  - It lives in your home config folder, never in a project or git repo.")
     say("  - ytsum sends it to api.anthropic.com and nowhere else.")
+    if workspace:
+        say(f"  - Requests use workspace {workspace}.")
     say(dim("  Anyone with administrator access to this machine could still read it,"))
     say(dim("  so revoke the key in the Console if the machine is ever compromised."))
     say()
-    return key
+    return key, workspace
 
 
-def setup_key() -> str:
-    # A key piped in (`echo $KEY | ytsum --set-key`) skips the prompt entirely.
+def setup_key() -> tuple[str, str | None]:
     if not sys.stdin.isatty():
         piped = sys.stdin.read().strip()
         if piped:
-            return store_key(piped) or sys.exit("Key rejected.")
+            stored = store_key(piped)
+            if not stored:
+                raise SystemExit("Key rejected.")
+            return stored
 
     say()
     say(bold("First run - ytsum needs an Anthropic API key."))
@@ -254,8 +327,9 @@ def setup_key() -> str:
                 say()
                 continue
 
-        if store_key(key):
-            return key
+        stored = store_key(key)
+        if stored:
+            return stored
 
 
 # ------------------------------------------------------------------- transcript
@@ -332,6 +406,7 @@ def ydl_options(lang: str, outdir: Path, no_certifi: bool) -> dict:
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,
+        "logger": QuietLogger(),
     }
     if no_certifi:
         # Behind a TLS-inspecting proxy, yt-dlp's bundled certifi store rejects the
@@ -340,19 +415,51 @@ def ydl_options(lang: str, outdir: Path, no_certifi: bool) -> dict:
     return opts
 
 
+def download(url: str, lang: str, outdir: Path) -> dict:
+    """Fetch subtitle metadata, working around TLS proxies and rate limits.
+
+    YouTube answers 429 when it has seen too many requests from an address.
+    It usually clears within a minute or two, so a few spaced retries are worth
+    more than an immediate failure.
+    """
+    delays = [5, 20, 45]
+    no_certifi = False
+    attempt = 0
+    while True:
+        try:
+            with YoutubeDL(ydl_options(lang, outdir, no_certifi)) as ydl:
+                return ydl.extract_info(url, download=True)
+        except DownloadError as err:
+            message = str(err)
+            if "certificate" in message.lower() and not no_certifi:
+                say(dim("TLS error - retrying with the system certificate store..."))
+                no_certifi = True
+                continue
+            if "429" in message or "Too Many Requests" in message:
+                if attempt < len(delays):
+                    wait = delays[attempt]
+                    attempt += 1
+                    say(dim(f"YouTube is rate-limiting us; waiting {wait}s "
+                            f"(try {attempt} of {len(delays)})..."))
+                    time.sleep(wait)
+                    continue
+                raise SystemExit(
+                    "YouTube is rate-limiting this network (HTTP 429).\n"
+                    "It usually clears in a few minutes - wait, then run the same "
+                    "command again.\nVideos already in the cache still work offline."
+                ) from err
+            if "Private video" in message or "members-only" in message.lower():
+                raise SystemExit("That video is private or members-only.") from err
+            if "Video unavailable" in message:
+                raise SystemExit("That video is unavailable.") from err
+            raise SystemExit(f"Could not reach that video.\n{message}") from err
+
+
 def fetch(url: str, lang: str) -> tuple[dict, str]:
     """Return (metadata, transcript text) for a video, without downloading it."""
     with tempfile.TemporaryDirectory() as tmp:
         outdir = Path(tmp)
-        try:
-            with YoutubeDL(ydl_options(lang, outdir, no_certifi=False)) as ydl:
-                info = ydl.extract_info(url, download=True)
-        except DownloadError as err:
-            if "certificate" not in str(err).lower():
-                raise SystemExit(f"Could not reach that video: {err}") from err
-            say(dim("TLS error - retrying with the system certificate store..."))
-            with YoutubeDL(ydl_options(lang, outdir, no_certifi=True)) as ydl:
-                info = ydl.extract_info(url, download=True)
+        info = download(url, lang, outdir)
 
         files = sorted(outdir.glob("*.vtt"))
         # Several tracks can match (en, en-orig, ...); prefer the exact language.
@@ -511,9 +618,9 @@ def main() -> None:
         if not args.video:
             return
 
-    key = None
+    key = workspace = None
     if not args.transcript_only:
-        key = load_key() or setup_key()
+        key, workspace = load_key() or setup_key()
 
     target = args.video or ask("YouTube URL or video ID: ")
     vid = video_id(target)
@@ -545,13 +652,22 @@ def main() -> None:
     say(f"Summarizing with {args.model}...")
     say()
     spend = Spend(args.model)
-    client = anthropic.Anthropic(api_key=key)
+    client = make_client(key, workspace)
     try:
         summary = summarize(
             client, args.model, meta_block, transcript, args.style, args.focus, spend
         )
     except anthropic.AuthenticationError:
         raise SystemExit(f"Anthropic rejected the stored key. Run `{APP} --reset-key`.")
+    except anthropic.APIStatusError as err:
+        detail = str(getattr(err, "message", "") or err)
+        if NEEDS_WORKSPACE in detail:
+            raise SystemExit(
+                "The stored key isn't tied to a workspace, so Anthropic won't accept it.\n"
+                f"Run `{APP} --reset-key` to add a workspace ID, or create a key inside a\n"
+                "workspace at Console > Workspaces > API keys."
+            ) from err
+        raise SystemExit(f"Anthropic refused the request:\n{detail[:300]}") from err
     except KeyboardInterrupt:
         raise SystemExit("\nStopped.")
 
