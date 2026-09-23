@@ -13,8 +13,9 @@ import json
 import os
 import re
 import sys
-import tempfile
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime
 from getpass import getpass
 from pathlib import Path
@@ -413,19 +414,22 @@ def vtt_to_text(vtt: str, marker_every: int = 60) -> str:
     return "\n".join(out).strip()
 
 
-def ydl_options(lang: str, outdir: Path, no_certifi: bool) -> dict:
+USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/140.0 Safari/537.36"
+)
+
+
+def ydl_options(cookies_from: str | None, no_certifi: bool) -> dict:
     opts = {
         "skip_download": True,
-        "writesubtitles": True,
-        "writeautomaticsub": True,
-        "subtitleslangs": [lang, f"{lang}-orig", f"{lang}.*"],
-        "subtitlesformat": "vtt",
-        "outtmpl": str(outdir / "%(id)s.%(ext)s"),
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,
         "logger": QuietLogger(),
     }
+    if cookies_from:
+        opts["cookiesfrombrowser"] = (cookies_from,)
     if no_certifi:
         # Behind a TLS-inspecting proxy, yt-dlp's bundled certifi store rejects the
         # proxy's certificate; this falls back to the system trust store.
@@ -433,38 +437,104 @@ def ydl_options(lang: str, outdir: Path, no_certifi: bool) -> dict:
     return opts
 
 
-def download(url: str, lang: str, outdir: Path) -> dict:
-    """Fetch subtitle metadata, working around TLS proxies and rate limits.
+def describe(info: dict) -> dict:
+    return {
+        "id": info.get("id", ""),
+        "title": info.get("title", "Untitled"),
+        "channel": info.get("uploader") or info.get("channel") or "Unknown channel",
+        "url": info.get("webpage_url", ""),
+        "duration": info.get("duration"),
+        "upload_date": info.get("upload_date"),
+    }
 
-    YouTube answers 429 when it has seen too many requests from an address.
-    It usually clears within a minute or two, so a few spaced retries are worth
-    more than an immediate failure.
+
+def language_candidates(tracks: dict, lang: str) -> list[str]:
+    """`en` should also match `en-GB`, which is all some videos publish."""
+    exact = [lang] if lang in tracks else []
+    variants = sorted(c for c in tracks if c.lower().startswith(f"{lang.lower()}-"))
+    return exact + variants
+
+
+def pick_track(info: dict, lang: str) -> tuple[str, str, str] | None:
+    """Return (url, language code, source) for the best caption track.
+
+    Human-written subtitles beat auto-generated ones: no garbled names, real
+    punctuation. Auto-generated is the fallback, and YouTube auto-translates
+    those into 100+ languages.
     """
+    for tracks, source in (
+        (info.get("subtitles") or {}, "subtitles"),
+        (info.get("automatic_captions") or {}, "auto-generated captions"),
+    ):
+        for code in language_candidates(tracks, lang):
+            for fmt in tracks[code]:
+                if fmt.get("ext") == "vtt" and fmt.get("url"):
+                    return fmt["url"], code, source
+    return None
+
+
+def http_get(url: str, jar=None) -> str:
+    """Fetch a caption file directly.
+
+    yt-dlp's own subtitle download is aggressively rate-limited by YouTube in a
+    way that plain requests for the same URL are not, so we do this part
+    ourselves rather than asking yt-dlp to write the file.
+    """
+    delays = [3, 10, 30]
+    opener = urllib.request.build_opener(
+        *([urllib.request.HTTPCookieProcessor(jar)] if jar is not None else [])
+    )
+    for attempt in range(len(delays) + 1):
+        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        try:
+            with opener.open(request, timeout=60) as response:
+                return response.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as err:
+            if err.code == 429 and attempt < len(delays):
+                say(dim(f"Captions rate-limited; waiting {delays[attempt]}s..."))
+                time.sleep(delays[attempt])
+                continue
+            if err.code == 429:
+                raise SystemExit(
+                    "YouTube is rate-limiting caption downloads from this network.\n"
+                    "Auto-generated captions are throttled harder than human-written "
+                    "subtitles.\nTry --cookies-from-browser firefox (or chrome/brave) to "
+                    "fetch as your\nsigned-in account, or wait and retry."
+                ) from err
+            raise SystemExit(f"Could not download the captions (HTTP {err.code}).") from err
+        except urllib.error.URLError as err:
+            raise SystemExit(f"Could not download the captions: {err.reason}") from err
+    raise SystemExit("Could not download the captions after several attempts.")
+
+
+def probe(url: str, cookies_from: str | None) -> tuple[dict, object]:
+    """Read a video's metadata, including its caption track index."""
     delays = [5, 20, 45]
     no_certifi = False
     attempt = 0
     while True:
         try:
-            with YoutubeDL(ydl_options(lang, outdir, no_certifi)) as ydl:
-                return ydl.extract_info(url, download=True)
+            with YoutubeDL(ydl_options(cookies_from, no_certifi)) as ydl:
+                return ydl.extract_info(url, download=False), ydl.cookiejar
         except DownloadError as err:
             message = str(err)
             if "certificate" in message.lower() and not no_certifi:
                 say(dim("TLS error - retrying with the system certificate store..."))
                 no_certifi = True
                 continue
+            if ("429" in message or "Too Many Requests" in message) and attempt < len(delays):
+                wait = delays[attempt]
+                attempt += 1
+                say(dim(f"YouTube is rate-limiting us; waiting {wait}s "
+                        f"(try {attempt} of {len(delays)})..."))
+                time.sleep(wait)
+                continue
             if "429" in message or "Too Many Requests" in message:
-                if attempt < len(delays):
-                    wait = delays[attempt]
-                    attempt += 1
-                    say(dim(f"YouTube is rate-limiting us; waiting {wait}s "
-                            f"(try {attempt} of {len(delays)})..."))
-                    time.sleep(wait)
-                    continue
                 raise SystemExit(
                     "YouTube is rate-limiting this network (HTTP 429).\n"
-                    "It usually clears in a few minutes - wait, then run the same "
-                    "command again.\nVideos already in the cache still work offline."
+                    "Wait a few minutes, or pass --cookies-from-browser firefox "
+                    "(or chrome/brave)\nto make requests as your signed-in account, "
+                    "which is throttled far less."
                 ) from err
             if "Private video" in message or "members-only" in message.lower():
                 raise SystemExit("That video is private or members-only.") from err
@@ -473,35 +543,23 @@ def download(url: str, lang: str, outdir: Path) -> dict:
             raise SystemExit(f"Could not reach that video.\n{message}") from err
 
 
-def fetch(url: str, lang: str) -> tuple[dict, str]:
+def fetch(url: str, lang: str, cookies_from: str | None = None) -> tuple[dict, str]:
     """Return (metadata, transcript text) for a video, without downloading it."""
-    with tempfile.TemporaryDirectory() as tmp:
-        outdir = Path(tmp)
-        info = download(url, lang, outdir)
-
-        files = sorted(outdir.glob("*.vtt"))
-        # Several tracks can match (en, en-orig, ...); prefer the exact language.
-        files = [f for f in files if f.name.endswith(f".{lang}.vtt")] or files
-        if not files:
-            available = sorted(
-                set(info.get("subtitles") or {}) | set(info.get("automatic_captions") or {})
-            )
-            hint = f"\nAvailable: {', '.join(available[:20])}" if available else ""
-            raise SystemExit(
-                f"This video has no '{lang}' captions.{hint}\n"
-                "Pick another with --lang, or transcribe the audio yourself (e.g. Whisper)."
-            )
-        transcript = vtt_to_text(files[0].read_text(encoding="utf-8", errors="replace"))
-
-    meta = {
-        "id": info.get("id", ""),
-        "title": info.get("title", "Untitled"),
-        "channel": info.get("uploader") or info.get("channel") or "Unknown channel",
-        "url": info.get("webpage_url", url),
-        "duration": info.get("duration"),
-        "upload_date": info.get("upload_date"),
-    }
-    return meta, transcript
+    info, jar = probe(url, cookies_from)
+    chosen = pick_track(info, lang)
+    if not chosen:
+        offered = sorted(info.get("subtitles") or {})[:12]
+        hint = f"\nHuman-written subtitles exist for: {', '.join(offered)}" if offered else ""
+        raise SystemExit(
+            f"This video has no '{lang}' captions.{hint}\n"
+            "Pick another language with --lang, or transcribe the audio yourself."
+        )
+    track_url, code, source = chosen
+    if code != lang:
+        say(dim(f"No '{lang}' track; using '{code}'."))
+    if source != "subtitles":
+        say(dim("Using auto-generated captions (names may be garbled)."))
+    return describe(info), vtt_to_text(http_get(track_url, jar))
 
 
 def header(meta: dict) -> str:
@@ -620,6 +678,11 @@ def main() -> None:
     parser.add_argument("--out", type=Path, help="write the summary to this file")
     parser.add_argument("--transcript-only", action="store_true", help="captions only, no API call")
     parser.add_argument("--refresh", action="store_true", help="re-fetch instead of using the cache")
+    parser.add_argument(
+        "--cookies-from-browser",
+        metavar="BROWSER",
+        help="use your signed-in YouTube session (firefox, chrome, brave, ...)",
+    )
     parser.add_argument("--reset-key", action="store_true", help="replace the stored API key")
     parser.add_argument(
         "--set-key", action="store_true", help="store a key read from stdin or a prompt"
@@ -657,7 +720,9 @@ def main() -> None:
         say(dim(f"Using cached captions ({len(transcript.split()):,} words)."))
     else:
         say("Fetching captions...")
-        meta, transcript = fetch(f"https://www.youtube.com/watch?v={vid}", args.lang)
+        meta, transcript = fetch(
+            f"https://www.youtube.com/watch?v={vid}", args.lang, args.cookies_from_browser
+        )
         meta_block = header(meta)
         cache.write_text(f"{meta_block}\n\n---\n\n{transcript}\n", encoding="utf-8")
         length = f", {fmt_duration(meta['duration'])}" if meta.get("duration") else ""

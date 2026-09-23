@@ -4,7 +4,7 @@ Summarize a YouTube video from the command line. Paste a link, get a summary.
 
 ```
 $ ytsum
-YouTube URL or video ID: https://www.youtube.com/watch?v=zBNKrja8dyY
+YouTube URL or video ID: zBNKrja8dyY
 
 How long should the summary be?
   1) Short      about 200 words of bullet points
@@ -12,18 +12,22 @@ How long should the summary be?
 Choose 1 or 2 [2]: 1
 
 Fetching captions...
-Got 15,919 words, 1h 18m.
-Interview with the company's NEW CEO
+No 'en' track; using 'en-GB'.
+Got 5,914 words, 29m 02s.
+INTERSTELLAR (2014) Breakdown | Ending Explained, Easter Eggs, Hidden Details...
 Summarizing with claude-opus-5...
 
-- the speaker says the founders resigned voluntarily, recognizing their limits in scaling
-  past ~100–200 people; they remain on the board and still own over half the company
-  [00:20:12].
-- the host's framing: the company's tech was never the problem — throughput now edges out
-  a rival broker — but messaging, go-to-market and especially opaque pricing are [00:18:00].
+- **Time as motif:** The host argues Nolan is obsessed with time; the Endurance is
+  shaped like a clock face with 12 compartments, and on Miller's planet the
+  soundtrack's ticks land every 1.25 seconds - one tick per day passing on Earth
+  [00:01:11].
+- **Black hole:** Gargantua was rendered from Einstein's equations at ~100 hours per
+  frame; robots TARS (an anagram of "star") and CASE/KIPP nod to Kip Thorne [00:02:50].
+- **Practical effects:** 500 acres of real corn were planted, later sold back for a
+  profit [00:05:20].
 ────────────────────────────────────────────────────────────
-28,110 in / 639 out · about $0.16
-Saved to 2026-09-23-example-video-brief.md
+11,829 in / 656 out · about $0.08
+Saved to ~/youtube-summarizer/2026-09-23-interstellar-2014-breakdown-brief.md
 ```
 
 ## Install
@@ -82,8 +86,10 @@ ytsum --focus "what they say about pricing" <url>
 | `--style notes` | dense nested study notes, timestamps on most bullets |
 | `--focus "..."` | centre the summary on one thing; it says so if the video barely covers it |
 | `--lang de` | caption language — YouTube auto-translates, so this works on English videos too |
+| | `en` also matches `en-GB`/`en-US`, and human-written subtitles win over auto-generated |
 | `--transcript-only` | print the cleaned captions, no API call, no cost |
 | `--refresh` | re-fetch instead of using the cached captions |
+| `--cookies-from-browser firefox` | fetch as your signed-in YouTube account if throttled |
 | `--reset-key` | replace the stored API key |
 | `--set-key` | store a key from a prompt or piped in from stdin |
 | `--model` | defaults to `claude-opus-5` |
@@ -136,9 +142,18 @@ Workspaces → your workspace → API keys. Such a key needs no extra configurat
 
 - **No captions, no summary.** Videos with captions disabled would need audio
   transcription (e.g. Whisper). Not implemented.
-- **YouTube rate limiting.** Fetching many videos in a short window earns an
-  HTTP 429. ytsum waits and retries three times (5s, 20s, 45s); if it still
-  fails, wait a few minutes. Cached videos keep working.
+- **YouTube rate limiting.** ytsum reads a video's caption index through yt-dlp
+  and then fetches the subtitle file itself, because yt-dlp's own subtitle
+  download draws HTTP 429 far sooner than a plain request for the same URL.
+  Measured on a throttled connection: human-written subtitles fetched fine this
+  way while yt-dlp's downloader was still being refused.
+
+  Auto-generated captions are throttled harder and can still fail while manual
+  subtitles succeed. There is no trick for that one - wait it out, or try
+  `--cookies-from-browser firefox` (also `chrome`, `brave`, `chromium`), which
+  only helps if you are actually signed in to YouTube in that browser. Reading
+  Chrome or Brave cookies on Linux needs the `secretstorage` package. Cached
+  videos keep working regardless.
 - **TLS behind an inspecting proxy.** yt-dlp ships its own certificate bundle,
   which a corporate TLS-inspecting proxy breaks. ytsum detects that and retries
   against the system trust store.
