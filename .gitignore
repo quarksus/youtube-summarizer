@@ -12,3 +12,4 @@ __pycache__/
 # Local output from earlier versions
 transcripts/
 summaries/
+.pytest_cache/

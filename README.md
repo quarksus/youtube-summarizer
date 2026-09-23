@@ -33,15 +33,32 @@ Saved to ~/youtube-summarizer/2026-09-23-interstellar-2014-breakdown-brief.md
 ## Install
 
 ```bash
+pipx install yt-tldw
+```
+
+or with [uv](https://docs.astral.sh/uv/): `uv tool install yt-tldw`.
+
+The distribution is called **yt-tldw**; the command it installs is **`ytsum`**.
+
+No pipx or uv? One line, no prerequisites:
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/quarksus/youtube-summarizer/main/install.sh | bash
 ```
 
-That is the whole setup. The installer checks your Python, builds an isolated
-environment, installs the dependencies and puts a `ytsum` command on your PATH.
-It only asks for a password if your system is missing Python's `venv` package and
-there's no way around it — on most machines it never needs one.
+That checks your Python, builds an isolated environment, installs the
+dependencies and puts `ytsum` on your PATH. It only asks for a password if your
+system is missing Python's `venv` package and there is no way around it — on
+most machines it never needs one.
 
-Already have [pipx](https://pipx.pypa.io)? `pipx install git+https://github.com/quarksus/youtube-summarizer.git` works too.
+## Upgrading
+
+```bash
+pipx upgrade yt-tldw
+```
+
+Worth doing when YouTube changes something: most breakages are fixed by a newer
+`yt-dlp`, which comes along with the upgrade.
 
 ## First run
 

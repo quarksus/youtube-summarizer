@@ -53,18 +53,37 @@ fi
 note "Environment ready at $VENV"
 
 # --- 3. ytsum and its dependencies -------------------------------------------
-# Installing from a local checkout if there is one, otherwise straight from GitHub.
+# Prefer the user's own tool installer when they have one; it will manage
+# upgrades better than we can. PyPI first, falling back to the git checkout.
+PACKAGE="yt-tldw"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo .)"
+
+if command -v uv >/dev/null 2>&1; then
+  note "Installing with uv"
+  uv tool install --upgrade "$PACKAGE" 2>/dev/null || uv tool install --upgrade "git+$REPO"
+  UV_BIN="$(uv tool dir 2>/dev/null)/../bin"
+  [ -x "$BIN_DIR/ytsum" ] || true
+  step "Done. Run: ytsum"
+  exit 0
+elif command -v pipx >/dev/null 2>&1; then
+  note "Installing with pipx"
+  pipx install --force "$PACKAGE" 2>/dev/null || pipx install --force "git+$REPO"
+  step "Done. Run: ytsum"
+  exit 0
+fi
+
 if [ -f "$HERE/pyproject.toml" ]; then
-  SOURCE="$HERE"
   note "Installing from this folder"
+  SOURCE="$HERE"
 else
-  SOURCE="git+$REPO"
-  note "Downloading from GitHub"
+  SOURCE="$PACKAGE"
 fi
 "$VENV/bin/pip" install --quiet --upgrade pip >/dev/null 2>&1 || true
-"$VENV/bin/pip" install --quiet --upgrade "$SOURCE" || fail "Installation failed."
-note "Installed $("$VENV/bin/python" -c 'import yt_dlp, anthropic; print("anthropic", anthropic.__version__)' 2>/dev/null || echo "dependencies")"
+if ! "$VENV/bin/pip" install --quiet --upgrade "$SOURCE" 2>/dev/null; then
+  note "Not on PyPI yet; installing from GitHub"
+  "$VENV/bin/pip" install --quiet --upgrade "git+$REPO" || fail "Installation failed."
+fi
+note "Installed dependencies"
 
 # --- 4. Put it on the PATH ---------------------------------------------------
 mkdir -p "$BIN_DIR"
